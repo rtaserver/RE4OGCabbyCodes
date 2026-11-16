@@ -42,6 +42,11 @@ bool g_was_up = false;
 int g_mode = -1;
 uint32_t g_crc_at_open[kFiles] = {};  // each file's checksums as the screen came up (save mode)
 int g_load_reported = -1;             // the load already logged
+// The save screen reads savegame00.sav again as it comes up, so the files'
+// checksums are only the ones to compare with once its list waits for the
+// player: until then the snapshot follows them (a Windows log of 2026-11-11 had
+// "saved to file 1" .. 9 the moment the screen came up, before any save).
+bool g_list_waited = false;
 char g_note[240] = {};
 bool g_note_error = false;
 
@@ -290,11 +295,15 @@ void tick(const game::Run& run) {
       // player makes now is seen as the one file that changed.
       for (int i = 0; i < kFiles; ++i) g_crc_at_open[i] = v.save[i].used ? v.save[i].crc : 0;
       g_load_reported = -1;
+      g_list_waited = false;
       if (c.mode == 2) logf("save files: the start-up check is reading savegame00.sav");
       else logf("save files: the %s screen is up (cursor on file %d)", c.mode == 1 ? "save" : "load", c.cursor + 1);
     }
     g_mode = c.mode;
-    if (c.mode == 1) {
+    if (c.mode == 1 && !g_list_waited) {
+      for (int i = 0; i < kFiles; ++i) g_crc_at_open[i] = v.save[i].used ? v.save[i].crc : 0;
+      g_list_waited = v.waiting;
+    } else if (c.mode == 1) {
       for (int i = 0; i < kFiles; ++i) {
         const uint32_t now = v.save[i].used ? v.save[i].crc : 0;
         if (now && now != g_crc_at_open[i]) {

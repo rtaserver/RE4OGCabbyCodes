@@ -112,7 +112,7 @@ BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID reserved) {
       install_crash_logger();
       HMODULE exe = GetModuleHandleA(nullptr);
       if (mem::iat_hook(exe, "KERNEL32.dll", "SetUnhandledExceptionFilter", crash_filter_hook()))
-        logf("crash: bio4.exe's SetUnhandledExceptionFilter import hooked - the game's filter is chained, ours stays on top");
+        logf("crash: bio4.exe's SetUnhandledExceptionFilter import hooked - the filter the game sets is chained to ours");
       config::load(g_dir);
       cheats::init();
       inventory::init();

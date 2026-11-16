@@ -65,6 +65,11 @@ wine tests/build/test_input.exe plain; wine tests/build/test_input.exe overlay  
 i686-w64-mingw32-g++ -std=c++20 -O2 -Wall -DWIN32_LEAN_AND_MEAN -DNOMINMAX -static -Isrc tests/test_tick.cpp \
     src/dispatch.cpp src/config.cpp src/crash.cpp tests/log_stub.cpp -o tests/build/test_tick.exe
 wine tests/build/test_tick.exe                                                   # "PASSED"
+# The crash logger: its filter called as UnhandledExceptionFilter calls it, beside filters that chain back to
+# ours and a SetUnhandledExceptionFilter made to do nothing (re4_tweaks' CrashDumps lock):
+i686-w64-mingw32-g++ -std=c++20 -O2 -Wall -DWIN32_LEAN_AND_MEAN -DNOMINMAX -static -Isrc tests/test_crash.cpp \
+    src/crash.cpp -o tests/build/test_crash.exe
+wine tests/build/test_crash.exe                                                  # "PASSED"
 python3 tools/gen_items.py --exe "$GAME_DIR/bio4.exe"         # regenerate src/items.h
 tools/ghidra/run.sh dec 0x7fe7e0          # decompile (several addresses per run are fine)
 tools/ghidra/run.sh xref 0xC06F40         # what refers to an address, and from which function
@@ -182,7 +187,23 @@ thread, and PeekMessageA (RE1's and RE3-1999's tick) is no tick here.
   test NOPs that range and checks that only `kSigTick` goes and the tick moves to the second point;
   `tests/test_tick.cpp` runs the real dispatch.cpp on two calls of its own (one tick a frame either way).
 - **The crash logger** hooks the exe's `SetUnhandledExceptionFilter` import, so the game's own filter
-  (set at start-up) is chained under ours.
+  (set at start-up: the CRT's, 0xA871C5, which only calls terminate() for a C++ exception and chains to
+  nothing) is chained under ours; once a second the tick puts ours back on top of a filter set over it some
+  other way and chains to that one. A crash writes one dump: the record, every register, the top 0xC0 bytes
+  of the stack raw (the faulting function's frame - in a game function, what it was working on), up to
+  eight values that point into a module, and the filter it is passed on to, named. Since 2026-11-10 (a
+  user's Windows report: one crash written three times in the same millisecond - something gave it to ours
+  again; not known what): the same exception given to ours again is a line, not another dump; ours given an
+  exception it is already passing on, on the same thread (a filter set over ours chains to the one it
+  replaced - ours - so after the tick's reassert the two pass it round), stops there - `tests/test_crash.cpp`,
+  where the version before went round 5,464 times until the stack ran out - while a new exception raised
+  inside the filter ours passed one on to (a packer's handler may, on purpose) is passed on as before,
+  three deep at most; a "previous filter" that is no code is not
+  chained to; and SetUnhandledExceptionFilter made to do nothing (a `ret 4` over its first bytes, past the
+  jumps in front - re4_tweaks does it when a `CrashDumps` folder is beside bio4.exe, after setting its
+  own) is said once and left alone: before, every reassert took the caller's eax (the milliseconds since
+  the last one) for the previous filter and logged "ours is back on top" each second. That handler then
+  takes every crash (a dump, its log and the save, zipped in CrashDumps); this log has none.
 - **The panel** (`overlay.cpp`, `overlay_dx9.cpp`): the exe's `Direct3DCreate9` import →
   `IDirect3D9::CreateDevice` → the device's `Present`/`EndScene`/`Reset`/`CreateAdditionalSwapChain`
   (and swap chains' `Present`). It draws in `Present` on the GX thread, from the snapshot the tick
@@ -202,7 +223,7 @@ thread, and PeekMessageA (RE1's and RE3-1999's tick) is no tick here.
   and Alt) while the panel takes text. `GetAsyncKeyState` (imported for Alt+Enter / Alt+F4 only) is
   guarded the same way. The panel draws its own pointer (`io.MouseDrawCursor`).
 
-## Windows (audited offline 2026-10-19; never run there)
+## Windows (audited offline 2026-10-19; one user's crash report from there, 2026-11-10)
 
 Asked 2026-10-19 (the user: "did we ensure this mod will work cleanly on windows like previous mods?"). The
 mod has run only under Proton. What the earlier mods met on Windows, and where this one stands:
@@ -237,7 +258,17 @@ mod has run only under Proton. What the earlier mods met on Windows, and where t
 - **Swapped mouse buttons** (left-handed): GetAsyncKeyState reads the physical buttons and the messages
   the logical ones; the panel's stuck-button check follows `SM_SWAPBUTTON` (RE3CabbyCodes' fix).
 - **The tick beside another tool's frame limiter**: its second point ("The tick").
-- **Open**: never run on Windows. The overlay's DirectInput and D3D9 handling is from its RTTI and
+- **A user's report from Windows** (2026-11-10, relayed by the user: re4_tweaks, the HD Project and "a few
+  other mods"; "it ran just fine ... over multiple sessions until i got to chapter 2-2"): ours was loaded
+  and its crash filter on top - the log's crash lines are its - with bio4.exe at 0x00BC0000 (ASLR). The
+  crash was the game's own texture lookup ("Image packs", below), not the mod's. Its full log, with the
+  cheats and panel actions of that session, was not seen.
+- **re4_tweaks' crash handler** (opt-in: a `CrashDumps` folder beside bio4.exe, which its README asks
+  crash reporters to make) sets its filter in its DllMain - dinput8.dll comes before steam_api.dll in
+  bio4.exe's imports - and writes `ret 4` over SetUnhandledExceptionFilter: ours stands aside ("The crash
+  logger").
+- **Open**: never run on Windows here; one user's report (above) is all that is known of it there. The
+  overlay's DirectInput and D3D9 handling is from its RTTI and
   strings and the siblings' findings, not from reading its 32-bit code; that Windows' own dinput8 has one
   class for every device rests on RE0CabbyCodes' Windows run (the same guard design). Paths are ANSI (a
   game folder outside the system code page keeps the stock DLL from loading). bio4.exe's manifest asks for
@@ -1748,6 +1779,62 @@ and the P.R.L. with their bits; Separate Ways' stock (FUN_00714D80) adds Ada's T
 FUN_008C66A0, 0x990780), kept by a continue (FUN_0063BF10), and read by ~20 scene scripts (replay
 differences).
 
+### Image packs and the texture lookup (a crash report's signature)
+
+**Not used by the mod** - read for a user's crash report (2026-11-10, Windows, re4_tweaks + the HD Project +
+other mods, chapter 2-2): `CRASH: ACCESS_VIOLATION at bio4.exe+0x66CF7C`, reading address 0, `stack[003]
+bio4.exe+0x548662`, `stack[031] bio4.exe+0x2EADD1`. 0x66CF7C is the CRT's memcpy (0xA6CF7C, its 16-byte
+tail: eax = source + 16 = 0x10, so the source was null); 0x948662 is in **GXInitTexObj** (FUN_009484C0,
+"src\Hap\XBOX360\gx.cpp"); 0x6EADD1 in the model draw (FUN_006EA820), which sets up each mesh's textures
+into GXTexObjs at `pG+3010` (0x20 each; the crash's was `pG+3030`, a mesh's second texture) as the
+texture list changes. Nothing of the mod's was on the stack, and no site, write or call of the mod's is in
+this code. What it means:
+
+- **The packs**: `<base>\ImagePackHD\%08x.pack` (`ImagePack` when 0x10ECB38 is 0), a table of 64 slots at
+  0x10BD930 (12 bytes: `+0` the pack in memory, `+4` its id - -1 free; the id's top byte its kind, those
+  of 0x0F, 0x18, 'F', 'I', 'L' kept by FUN_00951810 - `+8` flags, `+A` frames until it is freed, `+B` 1
+  once read). A pack: `+4` its count of textures, `+8` an offset per texture, made a pointer as it is read
+  (offset + the pack's address); each texture a 16-byte head (`+4` its number in the texture table once
+  set up, -1 before; `+8` the pack's id) and its data from `+10` ('T360' one way, FUN_0093FBF0; else
+  FUN_00956110). FUN_00951430 reads one at once
+  (`.pack`, else `.pack.yz2`, unpacked); FUN_00951DB0 starts a read and fills the slot at once - id and a
+  buffer - while the read's callback (FUN_0093FB40, FUN_00951C90 for `.yz2`) makes the offsets pointers and
+  sets `+B`; FUN_00951FE0 asks `+B` (FUN_006ADB40 waits on it). FUN_00951910 / FUN_00951A50 free a kind's
+  packs or put them on the countdown, which the GX frame's end (FUN_009524F0, on the render thread)
+  counts down to FUN_00951B90. In the vanilla install the packs are `.pack.yz2.lfs` (and a few `.pack.yz2`);
+  a plain `.pack` - what a texture mod drops in - is read first.
+- **GXInitTexObj** (obj, image, width, height, format, wrap s, wrap t, mipmap): `image` is 8 bytes - the
+  pack's id, then a texture's index (24 bits) and a byte. At first use it finds the slot with the id (none:
+  "Data of the image pack may have not been read", the object left empty - no crash), reads the index's
+  pointer, copies its 16-byte head, puts the texture in the texture table (0x10C8008, 0x30 each, count at
+  0x10ECB84) and rewrites `image` to that number with the byte 0xFF, the way taken from then on.
+- **So the crash** is a model drawn for the first time asking a pack that is there for a texture whose
+  pointer is null - which no index below the pack's count can give. The index is past the pack's end (the
+  zeros after its table), or the pack's data is not what was read (a slot filled before its read is done, a
+  read that failed, a damaged file): a texture or model mod that does not match the packs installed, or a
+  damaged one. Why the same place every time: it is where the game first draws that model. The dump the
+  logger writes since 2026-11-10 holds the rest (GXInitTexObj's ebp is esp+78 there: its first memcpy's
+  arguments are still on the stack, `add esp,18` after both, which puts its return at `stack[031]` as in
+  the report): `esp+004` the pack's address (memcpy's saved edi), `esp+020` the table entry read (the
+  first memcpy's source: pack + 8 + index x 4), `esp+04C` the index (its low 24 bits), `esp+050` the
+  pack's id - its file `ImagePackHD\<id>.pack` - and `esp+084` the model's 8 bytes.
+- **A pack drawn before its read is done** gives exactly this crash: FUN_00951DB0 puts the id and a new
+  buffer in the slot before the read, and GXInitTexObj never asks `+B` - an index read from a buffer not
+  read yet is 0. So whoever draws must wait (FUN_0093FBB0 / FUN_00951FE0); the two loaders found queue the
+  pack as a render command (FUN_00958AB0 by id, 19 callers; FUN_00958B30 by index) and wait.
+- **A weapon given from outside the game** (2026-11-11, asked after the second report): the merchant's
+  purchase (FUN_00790840) is FUN_00714700 + cItemMgr::get and nothing else - no model or pack is loaded for
+  it - so a weapon the panel adds is in the same state as one bought. The case screen's weapon viewer
+  (FUN_00773D20, ss_main.cpp) names the weapon's model file by the character and the weapon number
+  (FUN_007810C0: `SS/cmn/ss_wepNN.dat`, its pack 0x200000NN from the name's digits), loads both and waits for
+  both (FUN_005AC550, FUN_0093FBB0) before the character's builder (pl_type 0 FUN_00787880, 2 FUN_00786890,
+  3 FUN_00786FF0, 4 FUN_00786C80, 5 FUN_007872F0, Ashley FUN_007818A0). Leon has a file for every number
+  (unknown ones get ss_wep02). **Ada, HUNK, Krauser and Wesker have files only for their own weapons**
+  (Ada: 0, 1, 4, 7, 0xA, 0xB, 0xC, 0x30 and the grenades' numbers): for any other weapon FUN_007810C0 writes
+  no name at all and the viewer loads whatever its stack buffer held - not followed further (a load that
+  fails and is retried each frame, the wrong model, or a texture lookup like the one above). The weapon's
+  in-hand model (each Wep*_init, e.g. FUN_00927F50 "Wep05_init() wep model init failed.") was not followed.
+
 ### Signatures
 
 `src/sigs.h` is the one table (107 entries), read by `game.cpp` and by `tools/check_sigs.py`, which also
@@ -1800,7 +1887,15 @@ tick, overlay, input hooks), and the rest is the user's first sessions. In parti
 - Coexistence with re4_tweaks in play: it hands the game an IDirect3D9 and device of its own around the real
   ones (from the call site, D3D9Hook.cpp - the real ones carry the mod's hooks, so both panels should
   draw), and its default frame limiter takes the tick's first point away (the second ticks; offline only).
-  Anything on Windows ("Windows").
+  Anything on Windows ("Windows") - but one user's report (2026-11-10) had ours running beside it there
+  until a crash of the game's own.
+- That report's crash (2026-11-10, "Image packs and the texture lookup"): which pack and texture, and which
+  of that user's mods put them there, are not known - their log had the dump of before (no esi/edi, no raw
+  stack). Whether it happens without our DLL, and what the panel did that session, are theirs to tell. Why
+  the one crash was written three times is not known (no filter of re4_tweaks', Steam's steamclient.dll or
+  bio4.exe's chains back to ours; another of their mods may).
+- The crash logger's changes (2026-11-10, "The crash logger"): `tests/test_crash.cpp` only - not seen at a
+  real crash, beside re4_tweaks' CrashDumps lock or on Windows.
 - The Add list (2026-10-13; Add to the case, case items only, since 2026-10-14) was drawn and driven
   offline only - the real `overlay.cpp` under Wine with scripted ImGui input and a software rasteriser - not
   yet in the game. What the game does with
